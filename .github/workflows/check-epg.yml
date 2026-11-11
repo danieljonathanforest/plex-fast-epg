@@ -1,0 +1,94 @@
+
+name: Check Plex FAST EPG
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * *"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare Plex playlist and XMLTV
+        run: |
+          python3 - <<'PY'
+          import urllib.request
+          import gzip
+          import xml.etree.ElementTree as ET
+          import re
+          import html
+          import os
+
+          m3u_url = "https://raw.githubusercontent.com/BuddyChewChew/plex/main/playlists/plex_all.m3u"
+          xml_url = "https://i.mjh.nz/Plex/all.xml.gz"
+
+          def download(url):
+              req = urllib.request.Request(url, headers={"User-Agent": "Plex-EPG-Checker"})
+              with urllib.request.urlopen(req, timeout=120) as r:
+                  return r.read()
+
+          print("Downloading Plex playlist...")
+          m3u = download(m3u_url).decode("utf-8", errors="replace")
+
+          print("Downloading Plex guide...")
+          data = download(xml_url)
+          if data[:2] == b"\x1f\x8b":
+              data = gzip.decompress(data)
+
+          root = ET.fromstring(data)
+          xml_channels = {}
+          xml_names = {}
+
+          for channel in root.findall("channel"):
+              cid = channel.get("id", "")
+              names = [n.text or "" for n in channel.findall("display-name")]
+              xml_channels[cid] = names
+              for name in names:
+                  xml_names.setdefault(name.lower().strip(), []).append(cid)
+
+          playlist = []
+          for line in m3u.splitlines():
+              if line.startswith("#EXTINF"):
+                  id_match = re.search(r'tvg-id="([^"]*)"', line)
+                  name_match = re.search(r'tvg-name="([^"]*)"', line)
+                  if id_match:
+                      name = html.unescape(name_match.group(1)) if name_match else "Unknown"
+                      playlist.append((name, id_match.group(1)))
+
+          report = [
+              "# Plex FAST EPG diagnostic",
+              "",
+              f"- Playlist channels: {len(playlist)}",
+              f"- XMLTV channels: {len(xml_channels)}",
+              ""
+          ]
+
+          for target in ["CW Forever", "CW Gold"]:
+              report.append(f"## {target}")
+              found = False
+              for name, cid in playlist:
+                  if name.lower() == target.lower():
+                      found = True
+                      report.append(f"- Playlist ID: `{cid}`")
+                      report.append(f"- Exact XMLTV ID match: {'YES' if cid in xml_channels else 'NO'}")
+                      if cid in xml_channels:
+                          report.append(f"- XMLTV names: {', '.join(xml_channels[cid])}")
+                      else:
+                          matches = xml_names.get(target.lower(), [])
+                          report.append(f"- Same-name XMLTV IDs: {', '.join(matches) if matches else 'NONE'}")
+              if not found:
+                  report.append("- Not found in playlist")
+              report.append("")
+
+          matches = sum(1 for _, cid in playlist if cid in xml_channels)
+          report.append("## Overall")
+          report.append(f"- Matching IDs: {matches}")
+          report.append(f"- Non-matching IDs: {len(playlist) - matches}")
+
+          result = "\n".join(report)
+          print(result)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "w") as f:
+              f.write(result)
+          PY
+          
